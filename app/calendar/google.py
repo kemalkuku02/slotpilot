@@ -1,6 +1,8 @@
 import os
+import hashlib
 import time
 from datetime import datetime
+from urllib.parse import quote
 
 import httpx
 
@@ -38,18 +40,26 @@ class GoogleCalendar(CalendarProvider):
         return self.access_token or ""
 
     def _request(self, method: str, path: str, **kwargs):
-        response = httpx.request(method, f"https://www.googleapis.com/calendar/v3/calendars/{self.calendar_id}/events{path}",
+        calendar_id = quote(self.calendar_id, safe="")
+        response = httpx.request(method, f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events{path}",
                                  headers={"Authorization": f"Bearer {self._token()}"}, timeout=20, **kwargs)
         response.raise_for_status()
         return response.json() if response.content else {}
 
     def create_event(self, *, title: str, start: datetime, end: datetime, external_id: str) -> str:
-        event = self._request("POST", "", json={
-            "summary": title,
-            "start": {"dateTime": start.isoformat()},
-            "end": {"dateTime": end.isoformat()},
-            "extendedProperties": {"private": {"slotpilotBookingId": external_id}},
-        })
+        event_id = hashlib.sha256(external_id.encode("utf-8")).hexdigest()
+        try:
+            event = self._request("POST", "", json={
+                "id": event_id,
+                "summary": title,
+                "start": {"dateTime": start.isoformat()},
+                "end": {"dateTime": end.isoformat()},
+                "extendedProperties": {"private": {"slotpilotBookingId": external_id}},
+            })
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 409:
+                raise
+            event = self._request("GET", f"/{event_id}")
         return event["id"]
 
     def update_event(self, event_id: str, *, title: str, start: datetime, end: datetime) -> None:

@@ -1,4 +1,3 @@
-import json
 import os
 import time
 
@@ -6,18 +5,18 @@ from sqlalchemy import select
 
 from app.calendar.google import GoogleCalendar
 from app.config.loader import get_config
-from app.db.models import Booking, CalendarOutbox
+from app.db.models import Booking, CalendarOutbox, utcnow
 from app.db.session import SessionLocal
 
 
-def process_one(db) -> bool:
+def process_one(db, provider: GoogleCalendar | None = None) -> bool:
     item = db.scalar(select(CalendarOutbox).where(CalendarOutbox.processed_at.is_(None)).order_by(CalendarOutbox.id).with_for_update(skip_locked=True).limit(1))
     if item is None:
         return False
-    provider = GoogleCalendar()
+    provider = provider or GoogleCalendar()
     booking = db.get(Booking, item.booking_id)
     if booking is None:
-        item.processed_at = __import__("app.db.models", fromlist=["utcnow"]).utcnow()
+        item.processed_at = utcnow()
         db.commit()
         return True
     try:
@@ -30,7 +29,7 @@ def process_one(db) -> bool:
         elif item.action == "delete" and booking.calendar_event_id:
             provider.delete_event(booking.calendar_event_id)
             booking.calendar_event_id = None
-        item.processed_at = __import__("app.db.models", fromlist=["utcnow"]).utcnow()
+        item.processed_at = utcnow()
         db.commit()
     except Exception:
         item.attempts += 1
@@ -41,9 +40,10 @@ def process_one(db) -> bool:
 
 def main():
     delay = int(os.getenv("CALENDAR_RETRY_SECONDS", "20"))
+    provider = GoogleCalendar()
     while True:
         with SessionLocal() as db:
-            worked = process_one(db)
+            worked = process_one(db, provider)
         if not worked:
             time.sleep(delay)
 

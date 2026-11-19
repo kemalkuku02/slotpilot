@@ -56,13 +56,19 @@ def find_slots(
     while current_day <= end_date:
         for specialist in specialists:
             for interval in specialist.schedule.get(current_day.weekday(), []):
-                cursor = datetime.combine(current_day, interval.start, zone)
-                end_local = datetime.combine(current_day, interval.end, zone)
-                while cursor + duration <= end_local:
+                wall_cursor = datetime.combine(current_day, interval.start)
+                wall_end = datetime.combine(current_day, interval.end)
+                while wall_cursor + duration <= wall_end:
+                    # Use the first fold for repeated wall-clock times and skip nonexistent DST times.
+                    cursor = wall_cursor.replace(tzinfo=zone, fold=0)
                     slot_start = cursor.astimezone(UTC)
-                    slot_end = (cursor + duration).astimezone(UTC)
-                    local_time = cursor.timetz().replace(tzinfo=None)
-                    if slot_start >= now and (after is None or local_time >= after) and (before is None or local_time <= before):
+                    roundtrip = slot_start.astimezone(zone).replace(tzinfo=None)
+                    slot_end = slot_start + duration
+                    local_end = slot_end.astimezone(zone)
+                    local_time = wall_cursor.time()
+                    fits_schedule = (roundtrip == wall_cursor and local_end.date() == current_day
+                                     and local_end.timetz().replace(tzinfo=None) <= interval.end)
+                    if fits_schedule and slot_start >= now and (after is None or local_time >= after) and (before is None or local_time <= before):
                         if all(slot_end <= busy_start or slot_start >= busy_end for busy_start, busy_end in occupied[specialist.id]):
                             slots.append({
                                 "service_id": service.id,
@@ -73,7 +79,7 @@ def find_slots(
                                 "local_start": cursor.isoformat(),
                                 "price": service.price,
                             })
-                    cursor += step
+                    wall_cursor += step
                     if len(slots) >= limit:
                         return slots
         current_day += timedelta(days=1)
