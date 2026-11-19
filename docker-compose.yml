@@ -1,0 +1,81 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: slotpilot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-slotpilot-dev-only}
+      POSTGRES_DB: slotpilot
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slotpilot -d slotpilot"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://slotpilot:${POSTGRES_PASSWORD:-slotpilot-dev-only}@db:5432/slotpilot
+      BUSINESS_CONFIG: ${BUSINESS_CONFIG:-clinic}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      GOOGLE_CALENDAR_ID: ${GOOGLE_CALENDAR_ID:-primary}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REFRESH_TOKEN: ${GOOGLE_REFRESH_TOKEN:-}
+      GOOGLE_ACCESS_TOKEN: ${GOOGLE_ACCESS_TOKEN:-}
+    ports:
+      - "${APP_HOST:-127.0.0.1}:${APP_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  calendar-sync:
+    profiles: ["google-calendar"]
+    build: .
+    command: ["python", "-m", "app.calendar_sync"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://slotpilot:${POSTGRES_PASSWORD:-slotpilot-dev-only}@db:5432/slotpilot
+      BUSINESS_CONFIG: ${BUSINESS_CONFIG:-clinic}
+      GOOGLE_CALENDAR_ID: ${GOOGLE_CALENDAR_ID:-primary}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REFRESH_TOKEN: ${GOOGLE_REFRESH_TOKEN:-}
+      GOOGLE_ACCESS_TOKEN: ${GOOGLE_ACCESS_TOKEN:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      app:
+        condition: service_healthy
+
+  telegram-polling:
+    profiles: ["telegram-polling"]
+    build: .
+    command: ["python", "-m", "app.telegram_polling"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://slotpilot:${POSTGRES_PASSWORD:-slotpilot-dev-only}@db:5432/slotpilot
+      BUSINESS_CONFIG: ${BUSINESS_CONFIG:-clinic}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+    depends_on:
+      app:
+        condition: service_healthy
+
+volumes:
+  pgdata:

@@ -1,0 +1,41 @@
+business_name: "SlotPilot Клиника"
+timezone: "Europe/Moscow"
+slot_step_min: 15
+minimum_lead_min: 30
+tone: "Доброжелательно, кратко и по делу. Не ставь диагнозов и не придумывай медицинские рекомендации."
+specialists:
+  - id: smirnova
+    name: "Д-р Смирнова (косметолог)"
+    schedule:
+      0: [{start: "10:00", end: "19:00"}]
+      1: [{start: "10:00", end: "19:00"}]
+      2: [{start: "10:00", end: "19:00"}]
+      3: [{start: "10:00", end: "19:00"}]
+      4: [{start: "10:00", end: "17:00"}]
+  - id: volkov
+    name: "Д-р Волков (стоматолог-терапевт)"
+    schedule:
+      0: [{start: "09:00", end: "18:00"}]
+      2: [{start: "09:00", end: "18:00"}]
+      4: [{start: "09:00", end: "18:00"}]
+services:
+  - id: face_cleaning
+    name: "Ультразвуковая чистка лица"
+    price: 4500
+    duration_min: 60
+    specialist_ids: [smirnova]
+  - id: caries
+    name: "Лечение кариеса"
+    price: 6000
+    duration_min: 60
+    specialist_ids: [volkov]
+  - id: hygiene
+    name: "Профессиональная гигиена полости рта"
+    price: 5500
+    duration_min: 45
+    specialist_ids: [volkov]
+red_flags:
+  keywords: ["острая боль", "сильно болит", "опухла", "опухоль", "аллергия", "кровотечение", "температура"]
+  reply: "Ваше сообщение передано администратору. Если состояние острое, обратитесь за срочной медицинской помощью."
+qualification_questions:
+  - "Вы были у нас раньше или обращаетесь впервые?"
