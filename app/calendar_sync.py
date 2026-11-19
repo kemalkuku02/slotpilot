@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from app.calendar.google import GoogleCalendar
 from app.config.loader import get_config
-from app.db.models import Booking, CalendarOutbox, Client
+from app.db.models import Booking, CalendarOutbox
 from app.db.session import SessionLocal
 
 
@@ -24,8 +24,7 @@ def process_one(db) -> bool:
         if item.action == "create":
             config = get_config()
             service = next(s for s in config.services if s.id == booking.service_id)
-            client = db.get(Client, booking.client_id)
-            title = f"{service.name} — {client.name or 'Клиент'}"
+            title = f"{service.name} — запись #{booking.id}"
             event_id = provider.create_event(title=title, start=booking.start_at, end=booking.end_at, external_id=str(booking.id))
             booking.calendar_event_id = event_id
         elif item.action == "delete" and booking.calendar_event_id:
