@@ -104,13 +104,31 @@ python evals\run.py
 
 ### Google Calendar
 
-База остаётся источником истины. Создайте OAuth client с Calendar API и правом `calendar.events`, получите refresh token для сервисного календаря и задайте `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`, а также `GOOGLE_CALENDAR_ID`. Worker запускается так:
+База остаётся источником истины, Google Calendar — зеркалом. Для личного теста подключается Google-аккаунт, который владеет календарём.
 
-```powershell
-docker compose --profile google-calendar up --build
+1. В Google Cloud Console создай проект и включи **Google Calendar API**.
+2. В **Google Auth Platform → Audience** выбери `External` и добавь свой Google-аккаунт в **Test users**. Пока приложение в режиме тестирования, refresh token для Calendar scope истекает через 7 дней — для постоянного использования OAuth-приложение нужно перевести в production; Google может запросить верификацию для внешних пользователей.
+3. В **Google Auth Platform → Clients** создай OAuth client типа **Web application**. Добавь Authorized redirect URI `https://developers.google.com/oauthplayground`. [Playground требует Web client и этот redirect URI](https://developers.google.com/admob/api/v1/how-tos/playground).
+4. Открой [OAuth 2.0 Playground](https://developers.google.com/oauthplayground), нажми шестерёнку, включи **Use your own OAuth credentials**, выбери server-side flow и offline access, затем введи Client ID и Client secret.
+5. В поле собственных scopes вставь `https://www.googleapis.com/auth/calendar.events.owned`, нажми **Authorize APIs**, выбери тот же Google-аккаунт, а в Step 2 — **Exchange authorization code for tokens**. Скопируй показанный refresh token. `calendar.events.owned` достаточно для календаря, которым этот аккаунт владеет; для календаря, которым аккаунту поделились, используй `https://www.googleapis.com/auth/calendar.events`.
+6. В Google Calendar открой **Настройки и доступ** нужного календаря → **Интеграция календаря** и возьми **Идентификатор календаря**. Для основного личного календаря оставь `primary`.
+7. Добавь значения в локальный `.env`:
+
+```dotenv
+GOOGLE_CALENDAR_ID=primary
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+GOOGLE_REFRESH_TOKEN=...
 ```
 
-Если Google недоступен, подтверждённая запись остаётся в PostgreSQL, а outbox повторяет синхронизацию. OAuth-данные храните только в локальном `.env` или secret manager.
+Не присылай секреты в чат и не добавляй `.env` в Git. Приложение обновляет access token автоматически. Запусти синхронизацию:
+
+```powershell
+docker compose --profile google-calendar up -d --build calendar-sync
+docker compose --profile google-calendar logs -f calendar-sync
+```
+
+Остановка просмотра логов через `Ctrl+C` не останавливает контейнер. Если Google недоступен, подтверждённая запись остаётся в PostgreSQL, а outbox повторяет синхронизацию. OAuth-данные храни только в локальном `.env` или secret manager. Scope определяет, к каким календарям можно обращаться; для более узких прав выбирай минимальный scope, который соответствует календарю.
 
 ## Данные и ограничения
 
