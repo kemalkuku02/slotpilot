@@ -41,9 +41,12 @@ def test_home_redirects_to_admin():
 
 def test_admin_page_serves_inbox_template():
     response = main.admin_page("admin")
+    page = response.body.decode("utf-8")
     assert response.status_code == 200
-    assert "Панель администратора" in response.body.decode("utf-8")
-    assert "status-filter" in response.body.decode("utf-8")
+    assert "Панель администратора" in page
+    assert "status-filter" in page
+    assert "stream.onmessage=async()=>{await loadConversations();if(current!==null)await openChat(current,true,true)}" in page
+    assert "scroll-behavior:smooth" not in page
 
 
 def test_admin_conversation_list_includes_latest_message(db):
