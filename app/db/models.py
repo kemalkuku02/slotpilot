@@ -99,11 +99,17 @@ class PendingBooking(Base):
 
 class CalendarOutbox(Base):
     __tablename__ = "calendar_outbox"
+    __table_args__ = (
+        Index("ix_calendar_outbox_due", "processed_at", "next_attempt_at", "id"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     booking_id: Mapped[int] = mapped_column(ForeignKey("bookings.id"), index=True)
     action: Mapped[str] = mapped_column(String(20))
     payload: Mapped[str] = mapped_column(Text)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow,
+                                                       server_default=func.now(), nullable=False)
+    last_error: Mapped[str | None] = mapped_column(String(100))
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
