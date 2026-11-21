@@ -63,14 +63,18 @@ def find_slots(
                 wall_cursor = datetime.combine(current_day, interval.start)
                 wall_end = datetime.combine(current_day, interval.end)
                 while wall_cursor + duration <= wall_end:
-                    # Use the first fold for repeated wall-clock times and skip nonexistent DST times.
+                    # Skip ambiguous wall-clock starts and slots whose duration crosses a DST offset change.
                     cursor = wall_cursor.replace(tzinfo=zone, fold=0)
+                    alternate_fold = wall_cursor.replace(tzinfo=zone, fold=1)
+                    ambiguous_start = cursor.utcoffset() != alternate_fold.utcoffset()
                     slot_start = cursor.astimezone(UTC)
                     roundtrip = slot_start.astimezone(zone).replace(tzinfo=None)
                     slot_end = slot_start + duration
                     local_end = slot_end.astimezone(zone)
                     local_time = wall_cursor.time()
-                    fits_schedule = (roundtrip == wall_cursor and local_end.date() == current_day
+                    fits_schedule = (not ambiguous_start and roundtrip == wall_cursor
+                                     and local_end.utcoffset() == cursor.utcoffset()
+                                     and local_end.date() == current_day
                                      and local_end.timetz().replace(tzinfo=None) <= interval.end)
                     if fits_schedule and slot_start >= now and (after is None or local_time >= after) and (before is None or local_time <= before):
                         if all(slot_end <= busy_start or slot_start >= busy_end for busy_start, busy_end in occupied[specialist.id]):

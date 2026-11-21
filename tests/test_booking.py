@@ -1,8 +1,9 @@
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta, timezone
 
 import pytest
 
 from app.booking.service import book, cancel, find_slots, reschedule
+from app.config.schema import BusinessConfig
 from app.db.models import Booking, CalendarOutbox, Client, Conversation, ConversationStatus, Message
 
 
@@ -59,6 +60,98 @@ def test_find_slots_validates_limit_and_time_window(db, config):
         find_slots(db, config, "service", day, day, limit=1001)
     with pytest.raises(ValueError, match="Время начала"):
         find_slots(db, config, "service", day, day, after=time(15), before=time(14))
+
+
+def test_find_slots_respects_inclusive_local_time_window(db, config):
+    day = future_date()
+
+    slots = find_slots(db, config, "service", day, day, after=time(10, 30), before=time(11))
+
+    starts = [datetime.fromisoformat(item["local_start"]).time().replace(tzinfo=None) for item in slots]
+    assert starts
+    assert min(starts) == time(10, 30)
+    assert max(starts) == time(11)
+
+
+def test_service_longer_than_work_interval_has_no_slots(db, config):
+    value = config.model_dump()
+    value["services"][0]["duration_min"] = 121
+    long_service_config = BusinessConfig.model_validate(value)
+    day = future_date()
+
+    assert find_slots(db, long_service_config, "service", day, day) == []
+
+
+def test_specialist_off_day_has_no_slots(db, config):
+    value = config.model_dump()
+    day = future_date()
+    value["specialists"][0]["schedule"][day.weekday()] = []
+    off_day_config = BusinessConfig.model_validate(value)
+
+    assert find_slots(db, off_day_config, "service", day, day) == []
+
+
+def test_find_slots_converts_business_local_time_to_utc(db, config):
+    value = config.model_dump()
+    value["timezone"] = "America/Los_Angeles"
+    los_angeles_config = BusinessConfig.model_validate(value)
+    day = future_date()
+
+    slot = find_slots(db, los_angeles_config, "service", day, day, limit=1)[0]
+
+    local_start = datetime.fromisoformat(slot["local_start"])
+    utc_start = datetime.fromisoformat(slot["start_at"])
+    assert local_start.hour == 10
+    assert utc_start.tzinfo is not None
+    assert local_start.astimezone(UTC) == utc_start
+
+
+def _nth_sunday(year: int, month: int, number: int) -> date:
+    first = date(year, month, 1)
+    first_sunday = first + timedelta(days=(6 - first.weekday()) % 7)
+    return first_sunday + timedelta(days=7 * (number - 1))
+
+
+def _dst_config(config, day: date) -> BusinessConfig:
+    value = config.model_dump()
+    value["timezone"] = "America/New_York"
+    value["slot_step_min"] = 30
+    value["specialists"] = [{
+        "id": "one",
+        "name": "Specialist",
+        "schedule": {day.weekday(): [{"start": "01:00", "end": "04:00"}]},
+    }]
+    return BusinessConfig.model_validate(value)
+
+
+def test_spring_forward_skips_nonexistent_and_transition_crossing_slots(db, config):
+    today = date.today()
+    day = _nth_sunday(today.year, 3, 2)
+    if day <= today:
+        day = _nth_sunday(today.year + 1, 3, 2)
+    spring_config = _dst_config(config, day)
+
+    slots = find_slots(db, spring_config, "service", day, day, limit=50)
+
+    local_starts = [datetime.fromisoformat(item["local_start"]).strftime("%H:%M") for item in slots]
+    assert local_starts == ["01:00", "03:00", "03:30"]
+    assert all(datetime.fromisoformat(item["local_start"]).utcoffset() == timedelta(hours=-4)
+               for item in slots if item["local_start"].startswith(f"{day.isoformat()}T03:"))
+
+
+def test_fall_back_skips_ambiguous_repeated_hour(db, config):
+    today = date.today()
+    day = _nth_sunday(today.year, 11, 1)
+    if day <= today:
+        day = _nth_sunday(today.year + 1, 11, 1)
+    fall_config = _dst_config(config, day)
+
+    slots = find_slots(db, fall_config, "service", day, day, limit=50)
+
+    local_starts = [datetime.fromisoformat(item["local_start"]).strftime("%H:%M") for item in slots]
+    assert local_starts == ["02:00", "02:30", "03:00", "03:30"]
+    assert all(datetime.fromisoformat(item["local_start"]).utcoffset() == -timedelta(hours=5)
+               for item in slots)
 
 
 def test_cancel_releases_slot(db, config):
