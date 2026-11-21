@@ -31,3 +31,5 @@ scenarios:
   - {id: booking_clinic_face, kind: booking, config: clinic, input: "Да, подтверждаю чистку лица и телефон", expected_status: BOT, expected_bookings: 1, service_id: face_cleaning}
   - {id: booking_barber_haircut, kind: booking, config: barbershop, input: "Подтверждаю стрижку и телефон", expected_status: BOT, expected_bookings: 1, service_id: haircut}
   - {id: booking_barber_beard, kind: booking, config: barbershop, input: "Да, моделирование бороды, записывайте", expected_status: BOT, expected_bookings: 1, service_id: beard}
+  - {id: cancel_clinic_booking, kind: cancel, config: clinic, input: "Отмените мою запись на гигиену {time}", expected_status: BOT, expected_bookings: 1, expected_confirmed_bookings: 0, expected_cancelled_bookings: 1, service_id: hygiene}
+  - {id: reschedule_barber_booking, kind: reschedule, config: barbershop, input: "Перенесите мою стрижку на {time}", expected_status: BOT, expected_bookings: 2, expected_confirmed_bookings: 1, expected_cancelled_bookings: 1, service_id: haircut}

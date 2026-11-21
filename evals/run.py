@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.agent.engine import Agent
 from app.agent.provider import FakeLLM, tool_call
-from app.booking.service import find_slots
+from app.booking.service import book, find_slots
 from app.config.loader import load_config
 from app.db.models import Base, Booking, Client, Conversation, Message
 
@@ -37,10 +37,12 @@ def run_case(case):
         convo = Conversation(client_id=client.id, channel="eval")
         db.add(convo)
         db.flush()
-        db.add(Message(conversation_id=convo.id, role="client", text=case["input"]))
+        client_message = Message(conversation_id=convo.id, role="client", text=case["input"])
+        db.add(client_message)
         db.commit()
 
         kind = case["kind"]
+        user_text = case["input"]
         responses = []
         service_id = case.get("service_id") or config.services[0].id
         slot_service_id = service_id if any(s.id == service_id for s in config.services) else config.services[0].id
@@ -49,6 +51,33 @@ def run_case(case):
             responses = [tool_call("get_services", {}), {"role": "assistant", "content": "Каталог загружен."}]
         elif kind == "handoff":
             responses = [tool_call("handoff", {"reason": "Попросил оператора"})]
+        elif kind in ("cancel", "reschedule"):
+            initial_slot = future_slot(db, config, slot_service_id)
+            existing = book(db, config=config, client_id=client.id, service_id=slot_service_id,
+                            specialist_id=initial_slot["specialist_id"],
+                            start_at=datetime.fromisoformat(initial_slot["start_at"]),
+                            idempotency_key=f"eval-existing-{case['id']}")
+            requested_slot = initial_slot
+            responses = [tool_call("get_my_bookings", {})]
+            if kind == "cancel":
+                responses.append(tool_call("cancel", {"booking_id": existing.id}))
+            else:
+                alternatives = find_slots(db, config, slot_service_id, date.today() + timedelta(days=2),
+                                          date.today() + timedelta(days=23), limit=100)
+                replacement = next((slot for slot in alternatives
+                                    if slot["specialist_id"] == existing.specialist_id), None)
+                if replacement is None:
+                    raise RuntimeError(f"No replacement slot found for {case['id']}")
+                requested_slot = replacement
+                responses.append(tool_call("reschedule", {
+                    "booking_id": existing.id,
+                    "new_start": replacement["start_at"],
+                }))
+            local_start = datetime.fromisoformat(requested_slot["local_start"])
+            user_text = case["input"].format(time=local_start.strftime("%d.%m.%Y в %H:%M"))
+            client_message.text = user_text
+            db.commit()
+            responses.append({"role": "assistant", "content": "Готово, обновил вашу запись."})
         elif kind in ("booking", "reject_booking"):
             if case.get("past_time"):
                 start_at = datetime.now(UTC) - timedelta(days=5)
@@ -65,14 +94,19 @@ def run_case(case):
             responses = []
 
         fake = FakeLLM(responses)
-        answer = Agent(fake).reply(db, client, convo, case["input"], config)
+        answer = Agent(fake).reply(db, client, convo, user_text, config)
         if kind == "booking" and answer.startswith("Проверьте детали:"):
             db.add(Message(conversation_id=convo.id, role="client", text="Подтверждаю"))
             db.commit()
             answer = Agent(FakeLLM([])).reply(db, client, convo, "Подтверждаю", config)
-        booking_count = db.scalar(select(func.count()).select_from(Booking)) or 0
+        all_bookings = db.scalars(select(Booking)).all()
+        booking_count = len(all_bookings)
         expected_status = case["expected_status"]
         ok = convo.status == expected_status and booking_count == case["expected_bookings"]
+        if "expected_confirmed_bookings" in case:
+            ok = ok and sum(item.status == "confirmed" for item in all_bookings) == case["expected_confirmed_bookings"]
+        if "expected_cancelled_bookings" in case:
+            ok = ok and sum(item.status == "cancelled" for item in all_bookings) == case["expected_cancelled_bookings"]
         if kind == "catalog":
             tool_results = json.dumps(fake.requests[-1], ensure_ascii=False, default=str)
             ok = ok and all(service.name in tool_results and str(service.price) in tool_results for service in config.services)
