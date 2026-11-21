@@ -14,7 +14,7 @@ from app.agent.provider import LLMProvider, OpenAICompatibleProvider
 from app.booking.service import book, cancel, find_slots, reschedule
 from app.config.schema import BusinessConfig
 from app.db.models import Booking, Client, Conversation, ConversationStatus, Message, PendingBooking
-from app.safety.filters import PIIMask, check_red_flags, normalize
+from app.safety.filters import PIIMask, check_red_flags, needs_secondary_triage, normalize
 
 MAX_TOOL_CALLS = 6
 
@@ -120,16 +120,52 @@ class Agent:
     def __init__(self, provider: LLMProvider | None = None):
         self.provider = provider or OpenAICompatibleProvider.from_env()
 
+    def _classifier_requires_handoff(self, text: str) -> bool:
+        if not needs_secondary_triage(text):
+            return False
+        if self.provider is None:
+            return True
+        safe_text = PIIMask().mask(text)
+        messages = [
+            {"role": "system", "content": (
+                "Ты выполняешь консервативную проверку безопасности для администратора клиники. "
+                "Не ставь диагноз и не давай советов. Определи только, нужно ли остановить автоматическую запись "
+                "и передать сообщение человеку из-за возможного острого симптома, травмы или серьёзной реакции. "
+                "Если не уверен — urgent=true. Верни только JSON вида {\"urgent\":true} или {\"urgent\":false}."
+            )},
+            {"role": "user", "content": json.dumps({"message": safe_text}, ensure_ascii=False)},
+        ]
+        try:
+            response = self.provider.complete(messages, [])
+            content = response.get("content") if isinstance(response, dict) else None
+            match = re.search(r"\{[^{}]*\}", str(content or ""))
+            if not match:
+                return True
+            result = json.loads(match.group(0))
+            urgent = result.get("urgent") if isinstance(result, dict) else None
+            return urgent if isinstance(urgent, bool) else True
+        except Exception:
+            return True
+
+    @staticmethod
+    def _urgent_handoff(db: Session, conversation: Conversation, config: BusinessConfig) -> str:
+        conversation.status = ConversationStatus.URGENT_HUMAN.value
+        db.query(PendingBooking).filter(
+            PendingBooking.conversation_id == conversation.id,
+            PendingBooking.status == "pending",
+        ).update({"status": "cancelled"})
+        answer = config.red_flags.reply
+        db.add(Message(conversation_id=conversation.id, role="bot", text=answer))
+        db.commit()
+        return answer
+
     def reply(self, db: Session, client: Client, conversation: Conversation, text: str, config: BusinessConfig) -> str:
         if check_red_flags(text, config.red_flags.keywords):
-            conversation.status = ConversationStatus.URGENT_HUMAN.value
-            db.query(PendingBooking).filter(PendingBooking.conversation_id == conversation.id, PendingBooking.status == "pending").update({"status": "cancelled"})
-            answer = config.red_flags.reply
-            db.add(Message(conversation_id=conversation.id, role="bot", text=answer))
-            db.commit()
-            return answer
+            return self._urgent_handoff(db, conversation, config)
         if conversation.status != ConversationStatus.BOT.value:
             return "Ваш диалог передан администратору."
+        if self._classifier_requires_handoff(text):
+            return self._urgent_handoff(db, conversation, config)
         pending = db.scalar(select(PendingBooking).where(PendingBooking.conversation_id == conversation.id, PendingBooking.status == "pending").order_by(PendingBooking.id.desc()).limit(1))
         if pending:
             created_at = pending.created_at.replace(tzinfo=UTC) if pending.created_at.tzinfo is None else pending.created_at

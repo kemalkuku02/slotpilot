@@ -13,6 +13,17 @@ def check_red_flags(text: str, keywords: list[str]) -> bool:
     return any(normalize(keyword) in normalized for keyword in keywords if keyword.strip())
 
 
+def needs_secondary_triage(text: str) -> bool:
+    normalized = normalize(text)
+    symptom_terms = (
+        "болит", "болят", "боль", "болезнен", "ноет", "ноющая", "ноющие",
+        "опух", "припух", "отек", "кровит", "кровь", "сыпь", "крапивниц",
+        "температур", "озноб", "гной", "дышать", "дыхание", "онем", "травм",
+        "сломал зуб", "сломала зуб", "сломался зуб", "воспал",
+    )
+    return any(term in normalized for term in symptom_terms)
+
+
 @dataclass
 class PIIMask:
     mapping: dict[str, str] = field(default_factory=dict)

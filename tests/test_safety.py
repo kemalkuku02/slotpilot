@@ -5,7 +5,7 @@ from app.agent.provider import FakeLLM, tool_call
 from app.db.models import Booking, Client, Conversation, Message, PendingBooking
 from app.booking.service import book, find_slots
 from datetime import date, datetime, time, timedelta, timezone
-from app.safety.filters import PIIMask, check_red_flags, normalize
+from app.safety.filters import PIIMask, check_red_flags, needs_secondary_triage, normalize
 
 
 def test_red_flags_normalize_case_and_yo(config):
@@ -74,6 +74,79 @@ def test_urgent_message_escalates_before_llm(db, config):
     reply = Agent(provider=None).reply(db, client, conversation, "У меня аллергия", config)
     assert conversation.status == "URGENT_HUMAN"
     assert reply == config.red_flags.reply
+
+
+def test_ambiguous_symptom_uses_secondary_triage_and_escalates(db, config):
+    client = Client(telegram_id="symptom-user")
+    db.add(client)
+    db.flush()
+    conversation = Conversation(client_id=client.id, channel="telegram")
+    db.add(conversation)
+    db.flush()
+    db.add(Message(conversation_id=conversation.id, role="client", text="У меня ноет зуб и припухла десна"))
+    db.commit()
+    fake = FakeLLM([{"role": "assistant", "content": '{"urgent": true}'}])
+
+    reply = Agent(fake).reply(db, client, conversation, "У меня ноет зуб и припухла десна", config)
+
+    assert conversation.status == "URGENT_HUMAN"
+    assert reply == config.red_flags.reply
+    assert len(fake.requests) == 1
+    assert fake.requests[0][0]["role"] == "system"
+
+
+def test_ambiguous_nonurgent_symptom_continues_to_regular_agent(db, config):
+    client = Client(telegram_id="mild-symptom-user")
+    db.add(client)
+    db.flush()
+    conversation = Conversation(client_id=client.id, channel="telegram")
+    db.add(conversation)
+    db.flush()
+    db.add(Message(conversation_id=conversation.id, role="client", text="Зуб иногда ноет после холодной воды"))
+    db.commit()
+    fake = FakeLLM([
+        {"role": "assistant", "content": '{"urgent": false}'},
+        {"role": "assistant", "content": "Могу помочь подобрать время для записи."},
+    ])
+
+    reply = Agent(fake).reply(db, client, conversation, "Зуб иногда ноет после холодной воды", config)
+
+    assert conversation.status == "BOT"
+    assert reply == "Могу помочь подобрать время для записи."
+    assert len(fake.requests) == 2
+
+
+def test_secondary_triage_fails_closed_on_invalid_classifier_response(db, config):
+    client = Client(telegram_id="uncertain-symptom-user")
+    db.add(client)
+    db.flush()
+    conversation = Conversation(client_id=client.id, channel="telegram")
+    db.add(conversation)
+    db.flush()
+    db.add(Message(conversation_id=conversation.id, role="client", text="У меня кровь и болит десна"))
+    db.commit()
+    fake = FakeLLM([{"role": "assistant", "content": "Не могу определить."}])
+
+    Agent(fake).reply(db, client, conversation, "У меня кровь и болит десна", config)
+
+    assert conversation.status == "URGENT_HUMAN"
+
+
+def test_secondary_triage_only_runs_for_symptom_candidates(db, config):
+    client = Client(telegram_id="routine-user")
+    db.add(client)
+    db.flush()
+    conversation = Conversation(client_id=client.id, channel="telegram")
+    db.add(conversation)
+    db.flush()
+    db.add(Message(conversation_id=conversation.id, role="client", text="Запишите меня на чистку"))
+    db.commit()
+    fake = FakeLLM([{"role": "assistant", "content": "Подберу время."}])
+
+    Agent(fake).reply(db, client, conversation, "Запишите меня на чистку", config)
+
+    assert len(fake.requests) == 1
+    assert needs_secondary_triage("Запишите меня на чистку") is False
 
 
 def test_customer_can_only_see_their_own_future_bookings(db, config):

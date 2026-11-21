@@ -4,19 +4,19 @@ import json
 import os
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time
-from html import escape
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
-from sqlalchemy import select, text
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select, text
+from sqlalchemy.orm import Session, joinedload
 
 from app.agent.engine import Agent
 from app.booking.service import book, find_slots
 from app.config.loader import get_config
-from app.db.models import Base, Booking, Client, Conversation, ConversationStatus, Message, PendingBooking
+from app.db.models import Base, Booking, Client, Conversation, ConversationStatus, Message, PendingBooking, utcnow
 from app.db.session import SessionLocal, engine
 
 
@@ -100,6 +100,7 @@ def _get_conversation(db: Session, channel: str, user_id: str):
 def _receive(db: Session, channel: str, user_id: str, message_text: str):
     client, conversation = _get_conversation(db, channel, user_id)
     db.add(Message(conversation_id=conversation.id, role="client", text=message_text))
+    conversation.updated_at = utcnow()
     db.commit()
     answer = agent.reply(db, client, conversation, message_text, get_config())
     return conversation.id, answer
@@ -173,16 +174,20 @@ async def telegram_webhook(request: Request, x_telegram_bot_api_secret_token: st
 
 @app.get("/admin", response_class=HTMLResponse)
 def admin_page(_: str = Depends(admin_auth)):
-    return HTMLResponse("""<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>SlotPilot — диалоги</title>
-<style>body{font:15px system-ui;background:#f3f5f7;color:#18202a;margin:0}header{padding:18px 5vw;background:#fff;border-bottom:1px solid #dce2e7}main{display:grid;grid-template-columns:minmax(250px,34%) 1fr;gap:18px;max-width:1200px;margin:22px auto;padding:0 16px}.card{background:white;border:1px solid #dce2e7;border-radius:12px;padding:16px}button{border:0;border-radius:7px;background:#234c68;color:#fff;padding:9px 13px;cursor:pointer;margin:3px}.urgent{color:#a52020;font-weight:700}#list button{display:block;width:100%;text-align:left;background:#f4f6f7;color:#18202a;padding:12px}#messages{height:58vh;overflow:auto;border-block:1px solid #eee;padding:8px}.msg{padding:9px;margin:6px;border-radius:8px;background:#edf2f5}.client{margin-left:14%;background:#e8f2ff}input{padding:10px;width:75%;border:1px solid #ccd3d9;border-radius:7px}@media(max-width:700px){main{grid-template-columns:1fr}}</style>
-<header><b>SlotPilot</b> <span>Администрирование диалогов</span></header><main><section class="card"><h2>Диалоги</h2><div id="list"></div></section><section class="card"><div id="detail"><h2>Выберите диалог</h2></div></section></main>
-<script>let current=null;async function load(){let r=await fetch('/admin/api/conversations');if(r.ok){let a=await r.json();document.querySelector('#list').innerHTML=a.map(x=>`<button onclick="openChat(${x.id})"><span class="${x.status==='URGENT_HUMAN'?'urgent':''}">${x.status}</span><br>${esc(x.client_name||'Клиент '+x.client_id)} · ${esc(x.channel)}</button>`).join('')}}async function openChat(id){current=id;let r=await fetch('/admin/api/conversations/'+id);let x=await r.json();document.querySelector('#detail').innerHTML=`<h2>${esc(x.client_name||'Клиент')} · <span class="${x.status==='URGENT_HUMAN'?'urgent':''}">${x.status}</span></h2><p>${esc(x.phone||'')}</p><h3>Записи</h3>${x.bookings.length?x.bookings.map(b=>`<div>${esc(b.service_name)} · ${esc(b.status)} · ${esc(b.start_at)} · ${b.price} ₽</div>`).join(''):'<p>Записей пока нет</p>'}<button onclick="action('claim')">Перехватить</button><button onclick="action('return')">Вернуть боту</button><button onclick="action('close')">Закрыть диалог</button><div id="messages">${x.messages.map(m=>`<div class="msg ${m.role==='client'?'client':''}"><small>${esc(m.role)}</small><br>${esc(m.text)}</div>`).join('')}</div><form onsubmit="send(event)"><input id="reply" placeholder="Ответ клиенту"><button>Отправить</button></form>`}function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}async function action(a){await fetch(`/admin/api/conversations/${current}/${a}`,{method:'POST'});await load();await openChat(current)}async function send(e){e.preventDefault();let text=document.querySelector('#reply').value;await fetch(`/admin/api/conversations/${current}/reply`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});await openChat(current)}load();new EventSource('/admin/events').onmessage=()=>{load();if(current)openChat(current)};</script></html>""")
+    template = Path(__file__).parent / "templates" / "admin.html"
+    return HTMLResponse(template.read_text(encoding="utf-8"))
 
 
 @app.get("/admin/api/conversations")
 def admin_conversations(_: str = Depends(admin_auth), db: Session = Depends(get_db)):
-    rows = db.scalars(select(Conversation).order_by(Conversation.updated_at.desc()).limit(200)).all()
-    return [{"id": c.id, "client_id": c.client_id, "client_name": c.client.name, "status": c.status, "channel": c.channel, "updated_at": c.updated_at} for c in rows]
+    last_message = select(Message.text).where(Message.conversation_id == Conversation.id).order_by(Message.id.desc()).limit(1).scalar_subquery()
+    rows = db.execute(select(Conversation, last_message.label("last_message"))
+                      .options(joinedload(Conversation.client))
+                      .order_by(Conversation.updated_at.desc()).limit(200)).all()
+    return [{"id": c.id, "client_id": c.client_id, "client_name": c.client.name, "status": c.status,
+             "channel": c.channel, "updated_at": c.updated_at,
+             "last_message": preview[:180] if preview else None}
+            for c, preview in rows]
 
 
 @app.get("/admin/api/conversations/{conversation_id}")
@@ -240,6 +245,7 @@ def admin_reply(conversation_id: int, payload: AdminReply, _: str = Depends(admi
     if c.status == ConversationStatus.BOT.value:
         raise HTTPException(status_code=409, detail="Claim the conversation before replying")
     db.add(Message(conversation_id=c.id, role="admin", text=payload.text))
+    c.updated_at = utcnow()
     db.commit()
     if c.channel == "telegram":
         token = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -258,7 +264,19 @@ def admin_reply(conversation_id: int, payload: AdminReply, _: str = Depends(admi
 async def admin_events(_: str = Depends(admin_auth)):
     async def events():
         yield "event: ready\ndata: {}\n\n"
+        previous = None
         while True:
+            with SessionLocal() as db:
+                updated_at = db.scalar(select(func.max(Conversation.updated_at)))
+                last_message_id = db.scalar(select(func.max(Message.id)))
+            marker = {
+                "updated_at": updated_at.isoformat() if updated_at else None,
+                "last_message_id": last_message_id,
+            }
+            if marker != previous:
+                yield f"data: {json.dumps(marker)}\n\n"
+                previous = marker
+            else:
+                yield ": keep-alive\n\n"
             await asyncio.sleep(3)
-            yield "data: {}\n\n"
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
