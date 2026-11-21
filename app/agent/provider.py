@@ -17,6 +17,7 @@ class OpenAICompatibleProvider:
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.last_usage: dict[str, int] | None = None
 
     @classmethod
     def from_env(cls):
@@ -26,6 +27,7 @@ class OpenAICompatibleProvider:
         return cls(key, os.getenv("LLM_MODEL", "gpt-4o-mini"), os.getenv("LLM_BASE_URL", "https://api.openai.com/v1"))
 
     def complete(self, messages, tools):
+        self.last_usage = None
         response = httpx.post(
             f"{self.base_url}/chat/completions",
             headers={"Authorization": f"Bearer {self.api_key}"},
@@ -33,7 +35,18 @@ class OpenAICompatibleProvider:
             timeout=self.timeout,
         )
         response.raise_for_status()
-        return response.json()["choices"][0]["message"]
+        payload = response.json()
+        usage = payload.get("usage")
+        if isinstance(usage, dict):
+            prompt_tokens = usage.get("prompt_tokens")
+            completion_tokens = usage.get("completion_tokens")
+            if (isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool)
+                    and isinstance(completion_tokens, int) and not isinstance(completion_tokens, bool)):
+                self.last_usage = {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                }
+        return payload["choices"][0]["message"]
 
 
 class FakeLLM:
