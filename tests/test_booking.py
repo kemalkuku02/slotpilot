@@ -73,6 +73,16 @@ def test_find_slots_respects_inclusive_local_time_window(db, config):
     assert max(starts) == time(11)
 
 
+def test_find_slots_includes_exact_start_and_end_of_work_interval(db, config):
+    day = future_date()
+
+    slots = find_slots(db, config, "service", day, day, limit=100)
+
+    starts = [datetime.fromisoformat(item["local_start"]).time().replace(tzinfo=None) for item in slots]
+    assert starts[0] == time(10)
+    assert starts[-1] == time(11, 30)
+
+
 def test_service_longer_than_work_interval_has_no_slots(db, config):
     value = config.model_dump()
     value["services"][0]["duration_min"] = 121
