@@ -30,6 +30,10 @@ def find_slots(
     before: time | None = None,
     limit: int = 20,
 ) -> list[dict]:
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 1000:
+        raise ValueError("Лимит слотов должен быть от 1 до 1000")
+    if after is not None and before is not None and after > before:
+        raise ValueError("Время начала должно быть раньше или равно времени окончания")
     service = next((item for item in config.services if item.id == service_id), None)
     if service is None:
         raise ValueError("Неизвестная услуга")
@@ -102,8 +106,23 @@ def book(
         raise ValueError("Услуга или специалист не найдены")
     start = _utc(start_at, require_aware=True)
     key = idempotency_key or str(uuid4())
-    with _BOOKING_LOCK:
+
+    def existing_request() -> Booking | None:
         previous = db.scalar(select(Booking).where(Booking.idempotency_key == key))
+        if previous is None:
+            return None
+        same_request = (
+            previous.client_id == client_id
+            and previous.service_id == service_id
+            and previous.specialist_id == specialist_id
+            and _utc(previous.start_at) == start
+        )
+        if not same_request:
+            raise ValueError("Ключ идемпотентности уже использован для другой записи")
+        return previous
+
+    with _BOOKING_LOCK:
+        previous = existing_request()
         if previous:
             return previous
         start_local = start.astimezone(ZoneInfo(config.timezone))
@@ -131,7 +150,7 @@ def book(
                 db.refresh(booking)
         except IntegrityError as exc:
             db.rollback()
-            previous = db.scalar(select(Booking).where(Booking.idempotency_key == key))
+            previous = existing_request()
             if previous:
                 return previous
             raise ValueError("Это время уже занято") from exc
@@ -139,7 +158,8 @@ def book(
 
 
 def cancel(db: Session, booking_id: int) -> Booking:
-    booking = db.get(Booking, booking_id)
+    booking = db.scalar(select(Booking).where(Booking.id == booking_id).with_for_update()
+                        .execution_options(populate_existing=True))
     if booking is None:
         raise ValueError("Запись не найдена")
     if booking.status != BookingStatus.CANCELLED.value:
@@ -151,12 +171,13 @@ def cancel(db: Session, booking_id: int) -> Booking:
 
 
 def reschedule(db: Session, booking_id: int, new_start: datetime, config: BusinessConfig) -> Booking:
-    old = db.get(Booking, booking_id)
-    if old is None:
-        raise ValueError("Запись не найдена")
-    if old.status != BookingStatus.CONFIRMED.value:
-        raise ValueError("Перенести можно только действующую запись")
     with _BOOKING_LOCK:
+        old = db.scalar(select(Booking).where(Booking.id == booking_id).with_for_update()
+                        .execution_options(populate_existing=True))
+        if old is None:
+            raise ValueError("Запись не найдена")
+        if old.status != BookingStatus.CONFIRMED.value:
+            raise ValueError("Перенести можно только действующую запись")
         old.status = BookingStatus.CANCELLED.value
         db.flush()
         try:

@@ -3,11 +3,11 @@ import hmac
 import json
 import os
 from contextlib import asynccontextmanager
-from datetime import date, datetime
+from datetime import date, datetime, time
 from html import escape
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 from sqlalchemy import select, text
@@ -32,6 +32,11 @@ security = HTTPBasic()
 agent = Agent()
 
 
+@app.get("/", include_in_schema=False)
+def home():
+    return RedirectResponse(url="/admin", status_code=307)
+
+
 def get_db():
     db = SessionLocal()
     try:
@@ -54,7 +59,9 @@ class SlotQuery(BaseModel):
     service_id: str
     start_date: date
     end_date: date
-    after: str | None = None
+    after: time | None = None
+    before: time | None = None
+    limit: int = Field(default=20, ge=1, le=1000)
 
 
 class BookingRequest(BaseModel):
@@ -115,10 +122,9 @@ def services():
 
 @app.post("/api/slots")
 def slots(query: SlotQuery, db: Session = Depends(get_db)):
-    from datetime import time
     try:
-        after = time.fromisoformat(query.after) if query.after else None
-        return find_slots(db, get_config(), query.service_id, query.start_date, query.end_date, after=after)
+        return find_slots(db, get_config(), query.service_id, query.start_date, query.end_date,
+                          after=query.after, before=query.before, limit=query.limit)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

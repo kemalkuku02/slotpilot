@@ -3,7 +3,7 @@ from datetime import date, datetime, time, timedelta, timezone
 import pytest
 
 from app.booking.service import book, cancel, find_slots, reschedule
-from app.db.models import Booking, Client, Conversation, ConversationStatus, Message
+from app.db.models import Booking, CalendarOutbox, Client, Conversation, ConversationStatus, Message
 
 
 def setup_client(db):
@@ -37,11 +37,37 @@ def test_idempotency_prevents_duplicate(db, config):
     assert db.query(Booking).count() == 1
 
 
+def test_idempotency_key_cannot_be_reused_for_different_booking(db, config):
+    client = setup_client(db)
+    day = future_date()
+    first_at = datetime.combine(day, time(10), tzinfo=timezone.utc)
+    second_at = first_at + timedelta(minutes=30)
+    book(db, config=config, client_id=client.id, service_id="service", specialist_id="one",
+         start_at=first_at, idempotency_key="reused-key")
+
+    with pytest.raises(ValueError, match="Ключ идемпотентности"):
+        book(db, config=config, client_id=client.id, service_id="service", specialist_id="one",
+             start_at=second_at, idempotency_key="reused-key")
+
+
+def test_find_slots_validates_limit_and_time_window(db, config):
+    day = future_date()
+
+    with pytest.raises(ValueError, match="Лимит слотов"):
+        find_slots(db, config, "service", day, day, limit=0)
+    with pytest.raises(ValueError, match="Лимит слотов"):
+        find_slots(db, config, "service", day, day, limit=1001)
+    with pytest.raises(ValueError, match="Время начала"):
+        find_slots(db, config, "service", day, day, after=time(15), before=time(14))
+
+
 def test_cancel_releases_slot(db, config):
     client = setup_client(db)
     at = datetime.combine(future_date(), time(10), tzinfo=timezone.utc)
     booking = book(db, config=config, client_id=client.id, service_id="service", specialist_id="one", start_at=at, idempotency_key="cancel-me")
     cancel(db, booking.id)
+    cancel(db, booking.id)
+    assert db.query(CalendarOutbox).filter_by(booking_id=booking.id, action="delete").count() == 1
     slots = find_slots(db, config, "service", at.date(), at.date())
     assert any(datetime.fromisoformat(s["start_at"]) == at for s in slots)
 

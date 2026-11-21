@@ -1,7 +1,9 @@
+import json
+
 from app.agent.engine import Agent, guard_price_claims, is_explicit_confirmation
 from app.agent.provider import FakeLLM, tool_call
 from app.db.models import Booking, Client, Conversation, Message, PendingBooking
-from app.booking.service import find_slots
+from app.booking.service import book, find_slots
 from datetime import date, datetime, time, timedelta, timezone
 from app.safety.filters import PIIMask, check_red_flags, normalize
 
@@ -72,3 +74,93 @@ def test_urgent_message_escalates_before_llm(db, config):
     reply = Agent(provider=None).reply(db, client, conversation, "У меня аллергия", config)
     assert conversation.status == "URGENT_HUMAN"
     assert reply == config.red_flags.reply
+
+
+def test_customer_can_only_see_their_own_future_bookings(db, config):
+    client = Client(telegram_id="booking-owner")
+    other = Client(telegram_id="other-booking-owner")
+    db.add_all([client, other])
+    db.flush()
+    conversation = Conversation(client_id=client.id, channel="telegram")
+    db.add(conversation)
+    db.flush()
+    day = date.today() + timedelta(days=2)
+    slots = find_slots(db, config, "service", day, day, limit=2)
+    own_booking = book(db, config=config, client_id=client.id, service_id="service", specialist_id="one",
+                       start_at=datetime.fromisoformat(slots[0]["start_at"]), idempotency_key="owner-booking")
+    other_slot = find_slots(db, config, "service", day, day, limit=1)[0]
+    book(db, config=config, client_id=other.id, service_id="service", specialist_id="one",
+         start_at=datetime.fromisoformat(other_slot["start_at"]), idempotency_key="other-booking")
+    db.add(Message(conversation_id=conversation.id, role="client", text="Покажи мои записи"))
+    db.commit()
+    fake = FakeLLM([tool_call("get_my_bookings", {}), {"role": "assistant", "content": "Вот ваши записи."}])
+
+    Agent(fake).reply(db, client, conversation, "Покажи мои записи", config)
+
+    tool_result = next(message for message in fake.requests[1] if message.get("role") == "tool")
+    bookings = json.loads(tool_result["content"])
+    assert [item["booking_id"] for item in bookings] == [own_booking.id]
+
+
+def test_confirmation_handles_slot_taken_after_offer(db, config):
+    client = Client(telegram_id="pending-owner")
+    competitor = Client(telegram_id="pending-competitor")
+    db.add_all([client, competitor])
+    db.flush()
+    conversation = Conversation(client_id=client.id, channel="telegram")
+    db.add(conversation)
+    db.flush()
+    day = date.today() + timedelta(days=2)
+    slot = find_slots(db, config, "service", day, day)[0]
+    db.add(Message(conversation_id=conversation.id, role="client", text="Хочу записаться"))
+    db.commit()
+    fake = FakeLLM([tool_call("prepare_booking", {
+        "service_id": "service", "specialist_id": slot["specialist_id"], "start_at": slot["start_at"],
+        "name": "Алексей Иванов", "phone": "+79990000000",
+    })])
+    Agent(fake).reply(db, client, conversation, "Хочу записаться", config)
+    pending = db.query(PendingBooking).one()
+    book(db, config=config, client_id=competitor.id, service_id="service", specialist_id=slot["specialist_id"],
+         start_at=datetime.fromisoformat(slot["start_at"]), idempotency_key="competitor-booking")
+
+    db.add(Message(conversation_id=conversation.id, role="client", text="Подтверждаю"))
+    db.commit()
+    answer = Agent(FakeLLM([])).reply(db, client, conversation, "Подтверждаю", config)
+
+    assert "время уже заняли" in answer
+    assert pending.status == "cancelled"
+    assert db.query(Booking).count() == 1
+
+
+def test_agent_cannot_cancel_another_clients_booking(db, config):
+    client = Client(telegram_id="cancel-owner")
+    other = Client(telegram_id="cancel-other")
+    db.add_all([client, other])
+    db.flush()
+    conversation = Conversation(client_id=client.id, channel="telegram")
+    db.add(conversation)
+    db.flush()
+    day = date.today() + timedelta(days=2)
+    own_slot = find_slots(db, config, "service", day, day, limit=1)[0]
+    own = book(db, config=config, client_id=client.id, service_id="service", specialist_id="one",
+               start_at=datetime.fromisoformat(own_slot["start_at"]), idempotency_key="cancel-own")
+    other_slot = find_slots(db, config, "service", day, day, limit=1)[0]
+    foreign = book(db, config=config, client_id=other.id, service_id="service", specialist_id="one",
+                   start_at=datetime.fromisoformat(other_slot["start_at"]), idempotency_key="cancel-foreign")
+
+    db.add(Message(conversation_id=conversation.id, role="client", text="Отмени запись"))
+    db.commit()
+    reply = Agent(FakeLLM([
+        tool_call("cancel", {"booking_id": foreign.id}),
+        {"role": "assistant", "content": "Не удалось найти вашу запись."},
+    ])).reply(db, client, conversation, "Отмени запись", config)
+    assert reply == "Не удалось найти вашу запись."
+    assert db.get(Booking, foreign.id).status == "confirmed"
+
+    db.add(Message(conversation_id=conversation.id, role="client", text="Отмени мою запись"))
+    db.commit()
+    Agent(FakeLLM([
+        tool_call("cancel", {"booking_id": own.id}),
+        {"role": "assistant", "content": "Запись отменена."},
+    ])).reply(db, client, conversation, "Отмени мою запись", config)
+    assert db.get(Booking, own.id).status == "cancelled"

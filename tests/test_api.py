@@ -29,3 +29,9 @@ def test_health_chat_identity_and_admin_auth(monkeypatch):
         assert main.admin_auth(HTTPBasicCredentials(username="test-admin", password="a-long-test-password")) == "test-admin"
     finally:
         engine.dispose()
+
+
+def test_home_redirects_to_admin():
+    response = main.home()
+    assert response.status_code == 307
+    assert response.headers["location"] == "/admin"

@@ -66,4 +66,8 @@ class GoogleCalendar(CalendarProvider):
         self._request("PATCH", f"/{event_id}", json={"summary": title, "start": {"dateTime": start.isoformat()}, "end": {"dateTime": end.isoformat()}})
 
     def delete_event(self, event_id: str) -> None:
-        self._request("DELETE", f"/{event_id}")
+        try:
+            self._request("DELETE", f"/{event_id}")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code not in {404, 410}:
+                raise
