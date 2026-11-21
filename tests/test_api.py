@@ -2,6 +2,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.security import HTTPBasicCredentials
+from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
@@ -133,3 +134,59 @@ def test_closed_conversation_cannot_be_claimed_or_returned(db):
     assert return_error.value.status_code == 409
     db.refresh(conversation)
     assert conversation.status == ConversationStatus.CLOSED.value
+
+
+def test_admin_team_saves_local_override_without_mutating_default_config(config, monkeypatch, tmp_path):
+    from app.config.loader import config_path, load_config
+
+    monkeypatch.setenv("BUSINESS_CONFIG", "clinic")
+    monkeypatch.setenv("BUSINESS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "get_config", lambda: config)
+    default_path = Path(__file__).resolve().parents[1] / "configs" / "clinic.yaml"
+    original = default_path.read_text(encoding="utf-8")
+    request = main.AdminTeamUpdate.model_validate({
+        "specialists": [{
+            "id": "one",
+            "name": "Д-р Новый",
+            "schedule": {"0": [{"start": "08:30", "end": "16:00"}]},
+        }],
+        "service_specialists": {"service": ["one"]},
+    })
+
+    result = main.update_admin_team(request, "admin")
+
+    assert result == {"ok": True, "storage": "instance/configs"}
+    assert config_path().is_relative_to(tmp_path)
+    saved = load_config(config_path())
+    assert saved.specialists[0].name == "Д-р Новый"
+    assert saved.specialists[0].schedule[0][0].start.isoformat(timespec="minutes") == "08:30"
+    assert default_path.read_text(encoding="utf-8") == original
+
+
+def test_admin_team_page_and_service_details_are_available(config, monkeypatch):
+    monkeypatch.setattr(main, "get_config", lambda: config)
+
+    page = main.admin_team_page("admin")
+    response = main.admin_team("admin")
+
+    assert "Врачи и график" in page.body.decode("utf-8")
+    assert response["services"][0]["price"] == config.services[0].price
+    assert response["services"][0]["duration_min"] == config.services[0].duration_min
+
+
+def test_admin_team_rejects_service_without_a_doctor_and_keeps_file_unchanged(config, monkeypatch, tmp_path):
+    from app.config.loader import config_path
+
+    monkeypatch.setenv("BUSINESS_CONFIG", "clinic")
+    monkeypatch.setenv("BUSINESS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "get_config", lambda: config)
+    request = main.AdminTeamUpdate.model_validate({
+        "specialists": [],
+        "service_specialists": {"service": []},
+    })
+
+    with pytest.raises(HTTPException) as error:
+        main.update_admin_team(request, "admin")
+
+    assert error.value.status_code == 422
+    assert not config_path(writable=True).exists()

@@ -24,6 +24,12 @@ class Specialist(BaseModel):
     def check_weekdays(self):
         if any(day not in range(7) for day in self.schedule):
             raise ValueError("schedule keys must be weekdays 0..6")
+        for intervals in self.schedule.values():
+            ordered = sorted(intervals, key=lambda interval: interval.start)
+            if intervals != ordered:
+                raise ValueError("work intervals must be in chronological order")
+            if any(previous.end > current.start for previous, current in zip(ordered, ordered[1:])):
+                raise ValueError("work intervals must not overlap")
         return self
 
 

@@ -9,13 +9,14 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, joinedload
 
 from app.agent.engine import Agent
 from app.booking.service import book, find_slots
-from app.config.loader import get_config
+from app.config.loader import get_config, save_config
+from app.config.schema import BusinessConfig, Specialist
 from app.db.models import Base, Booking, Client, Conversation, ConversationStatus, Message, PendingBooking, utcnow
 from app.db.session import SessionLocal, engine
 
@@ -176,6 +177,60 @@ async def telegram_webhook(request: Request, x_telegram_bot_api_secret_token: st
 def admin_page(_: str = Depends(admin_auth)):
     template = Path(__file__).parent / "templates" / "admin.html"
     return HTMLResponse(template.read_text(encoding="utf-8"))
+
+
+@app.get("/admin/team", response_class=HTMLResponse)
+def admin_team_page(_: str = Depends(admin_auth)):
+    template = Path(__file__).parent / "templates" / "team.html"
+    return HTMLResponse(template.read_text(encoding="utf-8"))
+
+
+@app.get("/admin/api/team")
+def admin_team(_: str = Depends(admin_auth)):
+    config = get_config()
+    return {
+        "business_name": config.business_name,
+        "timezone": config.timezone,
+        "weekdays": ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"],
+        "specialists": [{
+            "id": specialist.id,
+            "name": specialist.name,
+            "schedule": {
+                str(day): [{"start": interval.start.strftime("%H:%M"), "end": interval.end.strftime("%H:%M")}
+                           for interval in intervals]
+                for day, intervals in specialist.schedule.items()
+            },
+        } for specialist in config.specialists],
+        "services": [{"id": service.id, "name": service.name, "price": service.price,
+                      "duration_min": service.duration_min,
+                      "specialist_ids": service.specialist_ids} for service in config.services],
+    }
+
+
+class AdminTeamUpdate(BaseModel):
+    specialists: list[Specialist]
+    service_specialists: dict[str, list[str]]
+
+
+@app.put("/admin/api/team")
+def update_admin_team(payload: AdminTeamUpdate, _: str = Depends(admin_auth)):
+    current = get_config()
+    data = current.model_dump(mode="python")
+    service_ids = {service.id for service in current.services}
+    if set(payload.service_specialists) != service_ids:
+        raise HTTPException(status_code=422, detail="Набор услуг в запросе не совпадает с конфигурацией")
+    data["specialists"] = [specialist.model_dump(mode="python") for specialist in payload.specialists]
+    for service in data["services"]:
+        service["specialist_ids"] = payload.service_specialists[service["id"]]
+    try:
+        updated = BusinessConfig.model_validate(data)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        save_config(updated)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Не удалось сохранить локальную конфигурацию") from exc
+    return {"ok": True, "storage": "instance/configs"}
 
 
 @app.get("/admin/api/conversations")

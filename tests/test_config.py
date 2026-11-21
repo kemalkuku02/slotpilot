@@ -31,3 +31,14 @@ def test_invalid_work_interval_rejected(config):
     value["specialists"][0]["schedule"][0] = [{"start": "13:00", "end": "12:00"}]
     with pytest.raises(ValidationError):
         BusinessConfig.model_validate(value)
+
+
+def test_overlapping_work_intervals_rejected(config):
+    value = config.model_dump()
+    value["specialists"][0]["schedule"][0] = [
+        {"start": "09:00", "end": "13:00"},
+        {"start": "12:30", "end": "17:00"},
+    ]
+
+    with pytest.raises(ValidationError, match="must not overlap"):
+        BusinessConfig.model_validate(value)
