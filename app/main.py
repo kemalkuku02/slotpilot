@@ -210,6 +210,8 @@ def admin_conversation(conversation_id: int, _: str = Depends(admin_auth), db: S
 def claim_conversation(conversation_id: int, _: str = Depends(admin_auth), db: Session = Depends(get_db)):
     c = db.get(Conversation, conversation_id)
     if c is None: raise HTTPException(status_code=404, detail="conversation not found")
+    if c.status == ConversationStatus.CLOSED.value:
+        raise HTTPException(status_code=409, detail="Закрытый диалог нельзя перехватить")
     c.status = ConversationStatus.HUMAN.value
     db.query(PendingBooking).filter_by(conversation_id=c.id, status="pending").update({"status": "cancelled"})
     db.commit()
@@ -220,6 +222,8 @@ def claim_conversation(conversation_id: int, _: str = Depends(admin_auth), db: S
 def return_conversation(conversation_id: int, _: str = Depends(admin_auth), db: Session = Depends(get_db)):
     c = db.get(Conversation, conversation_id)
     if c is None: raise HTTPException(status_code=404, detail="conversation not found")
+    if c.status == ConversationStatus.CLOSED.value:
+        raise HTTPException(status_code=409, detail="Закрытый диалог нельзя вернуть боту")
     c.status = ConversationStatus.BOT.value
     db.commit()
     return {"status": c.status}
@@ -242,11 +246,8 @@ class AdminReply(BaseModel):
 def admin_reply(conversation_id: int, payload: AdminReply, _: str = Depends(admin_auth), db: Session = Depends(get_db)):
     c = db.get(Conversation, conversation_id)
     if c is None: raise HTTPException(status_code=404, detail="conversation not found")
-    if c.status == ConversationStatus.BOT.value:
-        raise HTTPException(status_code=409, detail="Claim the conversation before replying")
-    db.add(Message(conversation_id=c.id, role="admin", text=payload.text))
-    c.updated_at = utcnow()
-    db.commit()
+    if c.status != ConversationStatus.HUMAN.value:
+        raise HTTPException(status_code=409, detail="Сначала перехватите диалог")
     if c.channel == "telegram":
         token = os.getenv("TELEGRAM_BOT_TOKEN")
         if not token or not c.client.telegram_id:
@@ -255,8 +256,16 @@ def admin_reply(conversation_id: int, payload: AdminReply, _: str = Depends(admi
         try:
             sent = httpx.post(f"https://api.telegram.org/bot{token}/sendMessage", json={"chat_id": c.client.telegram_id, "text": payload.text}, timeout=15)
             sent.raise_for_status()
-        except httpx.HTTPError as exc:
+            result = sent.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            db.rollback()
             raise HTTPException(status_code=502, detail="Telegram send failed") from exc
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            db.rollback()
+            raise HTTPException(status_code=502, detail="Telegram send failed")
+    db.add(Message(conversation_id=c.id, role="admin", text=payload.text))
+    c.updated_at = utcnow()
+    db.commit()
     return {"ok": True}
 
 

@@ -1,3 +1,4 @@
+import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.security import HTTPBasicCredentials
@@ -6,7 +7,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 import app.main as main
-from app.db.models import Base, Client, Conversation, Message
+from app.db.models import Base, Client, Conversation, ConversationStatus, Message
 
 
 def test_health_chat_identity_and_admin_auth(monkeypatch):
@@ -61,3 +62,74 @@ def test_admin_conversation_list_includes_latest_message(db):
 
     assert len(result) == 1
     assert result[0]["last_message"] == "Последний ответ"
+
+
+def test_admin_telegram_reply_requires_claim_and_persists_after_delivery(db, monkeypatch):
+    client = Client(telegram_id="telegram-chat-42")
+    db.add(client)
+    db.flush()
+    conversation = Conversation(client_id=client.id, channel="telegram", status=ConversationStatus.BOT.value)
+    db.add(conversation)
+    db.commit()
+
+    with pytest.raises(HTTPException) as not_claimed:
+        main.admin_reply(conversation.id, main.AdminReply(text="Здравствуйте"), "admin", db)
+    assert not_claimed.value.status_code == 409
+    assert db.query(Message).filter_by(conversation_id=conversation.id, role="admin").count() == 0
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-bot-token")
+    main.claim_conversation(conversation.id, "admin", db)
+    sent = {}
+
+    def send_message(url, *, json, timeout):
+        sent.update(url=url, json=json, timeout=timeout)
+        return httpx.Response(200, json={"ok": True}, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", send_message)
+    result = main.admin_reply(conversation.id, main.AdminReply(text="Здравствуйте"), "admin", db)
+
+    assert result == {"ok": True}
+    assert sent["url"].endswith("/sendMessage")
+    assert sent["json"] == {"chat_id": "telegram-chat-42", "text": "Здравствуйте"}
+    assert db.query(Message).filter_by(conversation_id=conversation.id, role="admin").one().text == "Здравствуйте"
+
+
+def test_admin_telegram_failure_does_not_save_unsent_reply(db, monkeypatch):
+    client = Client(telegram_id="telegram-chat-failure")
+    db.add(client)
+    db.flush()
+    conversation = Conversation(client_id=client.id, channel="telegram", status=ConversationStatus.HUMAN.value)
+    db.add(conversation)
+    db.commit()
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-bot-token")
+
+    def fail_to_send(url, **kwargs):
+        request = httpx.Request("POST", url)
+        raise httpx.ConnectError("telegram unavailable", request=request)
+
+    monkeypatch.setattr(httpx, "post", fail_to_send)
+
+    with pytest.raises(HTTPException) as failure:
+        main.admin_reply(conversation.id, main.AdminReply(text="Ответ"), "admin", db)
+
+    assert failure.value.status_code == 502
+    assert db.query(Message).filter_by(conversation_id=conversation.id, role="admin").count() == 0
+
+
+def test_closed_conversation_cannot_be_claimed_or_returned(db):
+    client = Client(telegram_id="closed-conversation")
+    db.add(client)
+    db.flush()
+    conversation = Conversation(client_id=client.id, status=ConversationStatus.CLOSED.value)
+    db.add(conversation)
+    db.commit()
+
+    with pytest.raises(HTTPException) as claim_error:
+        main.claim_conversation(conversation.id, "admin", db)
+    with pytest.raises(HTTPException) as return_error:
+        main.return_conversation(conversation.id, "admin", db)
+
+    assert claim_error.value.status_code == 409
+    assert return_error.value.status_code == 409
+    db.refresh(conversation)
+    assert conversation.status == ConversationStatus.CLOSED.value
